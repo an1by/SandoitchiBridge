@@ -29,5 +29,5 @@ if '%errorlevel%' NEQ '0' (
     CD /D "%~dp0"
 :--------------------------------------
 
-netsh advfirewall firewall add rule name="RustyBridge" dir=in action=allow program="%~dp0rusty-bridge.exe" enable=yes profile=public,private
-netsh advfirewall firewall add rule name="RustyBridgeUi" dir=in action=allow program="%~dp0rusty-bridge-ui.exe" enable=yes profile=public,private
+netsh advfirewall firewall add rule name="SandoitchiBridge" dir=in action=allow program="%~dp0sandoitchi_bridge.exe" enable=yes profile=public,private
+netsh advfirewall firewall add rule name="SandoitchiBridgeUi" dir=in action=allow program="%~dp0sandoitchi_bridge_ui.exe" enable=yes profile=public,private

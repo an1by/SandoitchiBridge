@@ -1,19 +1,15 @@
 [package]
-name = "rusty-bridge"
-version = "0.1.0"
+name = "sandoitchi_bridge"
+version = "0.2.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [workspace]
-members = [
-    "ui", "vts",
-]
+members = ["ui", "service"]
 
 [dependencies]
-rusty-bridge-lib = { path = "./vts" }
+sandoitchi_bridge_service = { path = "./service" }
 clap = { version = "4.5.16", features = ["derive"] }
-evalexpr = {version = "11.3.0", features = ["rand"]}
+evalexpr = { version = "11.3.0", features = ["rand"] }
 log = "0.4.22"
 log4rs = "1.3.0"
 serde = { version = "1.0.197", features = ["derive"] }

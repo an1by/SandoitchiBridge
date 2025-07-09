@@ -1,24 +1,29 @@
 use std::{
+    cmp::max,
     collections::VecDeque,
     fs,
     net::{TcpStream, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::Receiver,
-        Arc,
+        Arc, LazyLock, Mutex,
     },
+    time::{Duration, Instant, SystemTime},
 };
 
-use evalexpr::{ContextWithMutableVariables, HashMapContext, Node};
+use evalexpr::{ContextWithMutableVariables, HashMapContext, IterateVariablesContext, Node};
 use log::{error, info, warn};
 use serde_json::Value;
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
-use crate::vtsphone::TrackingResponce;
+use crate::{
+    tracking::response::TrackingResponse,
+    vts::{requests, responses},
+};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-struct VTSApiResponce<T> {
+struct VTSApiResponse<T> {
     api_name: String,
     api_version: String,
     timestamp: u64,
@@ -39,90 +44,6 @@ struct VTSApiRequest<'a, T> {
     data: Option<T>,
 }
 
-pub mod responces {
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Discovery {
-        pub active: bool,
-        pub port: u16,
-        #[serde(rename(deserialize = "instanceID"))]
-        pub instance_id: String,
-        pub window_title: String,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct APIStateResponse {
-        pub active: bool,
-        pub v_tube_studio_version: String,
-        pub current_session_authenticated: bool,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct AuthenticationToken {
-        pub authentication_token: String,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct AuthenticationResponse {
-        pub authenticated: bool,
-        pub reason: String,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct APIError {
-        #[serde(rename(deserialize = "errorID"))]
-        pub error_id: u16,
-        pub message: String,
-    }
-}
-
-pub mod requests {
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct AuthToken<'a> {
-        pub plugin_name: &'a str,
-        pub plugin_developer: &'a str,
-        pub plugin_icon: Option<&'a str>,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Auth<'a> {
-        pub plugin_name: &'a str,
-        pub plugin_developer: &'a str,
-        pub authentication_token: &'a str,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ParameterCreation {
-        pub parameter_name: String,
-        pub explanation: String,
-        pub min: f64,
-        pub max: f64,
-        pub default_value: f64,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    pub struct TrackingParam<'a> {
-        pub id: &'a str,
-        pub weight: Option<f64>,
-        pub value: f64, // -1000000 | 1000000
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug)]
-    #[serde(rename_all = "camelCase")]
-    pub struct InjectParams<'a> {
-        pub face_found: bool,
-        pub mode: &'a str,
-        pub parameter_values: Vec<TrackingParam<'a>>,
-    }
-}
-
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct CalcFn {
@@ -133,19 +54,32 @@ struct CalcFn {
     default_value: f64,
 }
 
-pub struct VtsPc;
+static LATEST_CONTEXT: LazyLock<Mutex<HashMapContext>> =
+    LazyLock::new(|| Mutex::new(HashMapContext::new()));
 
-impl VtsPc {
+pub struct VTubeStudioPlugin;
+
+impl VTubeStudioPlugin {
+    const REQUEST_ID: &str = "SandoitchiBridge";
+    const VTS_API_VERSION: &str = "1.0";
+
     pub fn run(
-        receiver: Receiver<TrackingResponce>,
+        receiver: Receiver<TrackingResponse>,
         transformation_cfg_path: String,
+        config_reload_delay: u64,
         active: Arc<AtomicBool>,
     ) {
         while active.load(Ordering::Relaxed) {
             let flag = Arc::clone(&active);
 
-            let websocket = VtsPc::connect();
-            VtsPc::msg_loop(websocket, &receiver, &transformation_cfg_path, flag);
+            let websocket = VTubeStudioPlugin::connect();
+            VTubeStudioPlugin::msg_loop(
+                websocket,
+                &receiver,
+                &transformation_cfg_path,
+                &config_reload_delay,
+                flag,
+            );
         }
     }
 
@@ -159,7 +93,7 @@ impl VtsPc {
                 }
                 Err(error) => {
                     warn!("{}", error);
-                    match VtsPc::discover_port() {
+                    match VTubeStudioPlugin::discover_port() {
                         Ok(prt) => {
                             port = prt;
                         }
@@ -191,7 +125,7 @@ impl VtsPc {
             Err(e) => return Err(e.to_string()),
         };
 
-        let data: VTSApiResponce<responces::Discovery> = match serde_json::from_slice(&buf[..amt]) {
+        let data: VTSApiResponse<responses::Discovery> = match serde_json::from_slice(&buf[..amt]) {
             Ok(d) => d,
             Err(e) => return Err(e.to_string()),
         };
@@ -201,25 +135,43 @@ impl VtsPc {
 
     fn msg_loop(
         mut websocket: WebSocket<MaybeTlsStream<TcpStream>>,
-        receiver: &Receiver<TrackingResponce>,
+        receiver: &Receiver<TrackingResponse>,
         transformation_cfg_path: &String,
+        config_reload_delay: &u64,
         active: Arc<AtomicBool>,
     ) {
         let mut msg_buffer: VecDeque<Message> = VecDeque::new();
         let mut token: Option<String> = fs::read_to_string("token").ok();
 
-        msg_buffer.push_back(VtsPc::req_status_msg());
+        let vts_status = VTubeStudioPlugin::req_status_msg();
+        let (mut precalc_funcs, mut new_params) =
+            VTubeStudioPlugin::precalc_cfg(transformation_cfg_path);
 
-        let (precalc_funcs, mut new_params) = VtsPc::precalc_cfg(transformation_cfg_path);
-
+        msg_buffer.push_back(vts_status.clone());
         msg_buffer.append(&mut new_params);
 
-        // let interval = time::Duration::from_millis(30);
-        // let mut next_time = std::time::Instant::now() + interval;
+        let config_reload_interval_delay = max(*config_reload_delay, 0);
+        let config_reload_interval = Duration::from_millis(config_reload_interval_delay);
+        let mut last_time_config_reloaded = Instant::now();
 
         let mut dont_send = false;
 
         while active.load(Ordering::Relaxed) {
+            if config_reload_interval_delay > 0
+                && last_time_config_reloaded.elapsed() > config_reload_interval
+            {
+                last_time_config_reloaded = Instant::now();
+
+                (precalc_funcs, new_params) =
+                    VTubeStudioPlugin::precalc_cfg(transformation_cfg_path);
+
+                msg_buffer.clear();
+                msg_buffer.push_back(vts_status.clone());
+                msg_buffer.append(&mut new_params);
+
+                info!("Config reloaded")
+            }
+
             if !dont_send {
                 if let Some(msg) = msg_buffer.front() {
                     match websocket.send(msg.clone()) {
@@ -230,7 +182,12 @@ impl VtsPc {
                         }
                     }
                 } else {
-                    let tracking_data = VtsPc::tracking_msg(&precalc_funcs, receiver);
+                    let mut tracking_data =
+                        VTubeStudioPlugin::tracking_msg(&precalc_funcs, receiver);
+                    if tracking_data.is_none() {
+                        tracking_data = VTubeStudioPlugin::track_cyclic_info_only(&precalc_funcs);
+                    }
+
                     if tracking_data.is_some() {
                         match websocket.send(tracking_data.unwrap()) {
                             Ok(_) => {}
@@ -241,7 +198,7 @@ impl VtsPc {
                         }
                     } else {
                         continue;
-                    }
+                    };
                 }
             }
 
@@ -255,7 +212,7 @@ impl VtsPc {
                             Some(msg_type) => match msg_type {
                                 "APIError" => {
                                     let err_data = serde_json::from_value::<
-                                        VTSApiResponce<responces::APIError>,
+                                        VTSApiResponse<responses::APIError>,
                                     >(msg_value)
                                     .unwrap();
                                     // warn!("API error: {:?}", err_data.data);
@@ -287,18 +244,18 @@ impl VtsPc {
                                 "APIStateResponse" => {
                                     let state_data =
                                         serde_json::from_value::<
-                                            VTSApiResponce<responces::APIStateResponse>,
+                                            VTSApiResponse<responses::APIStateResponse>,
                                         >(msg_value)
                                         .unwrap();
                                     msg_buffer.pop_front();
                                     if !state_data.data.current_session_authenticated {
-                                        msg_buffer.push_front(VtsPc::auth(&token));
+                                        msg_buffer.push_front(VTubeStudioPlugin::auth(&token));
                                     }
                                 }
                                 "AuthenticationTokenResponse" => {
                                     let token_data =
                                         serde_json::from_value::<
-                                            VTSApiResponce<responces::AuthenticationToken>,
+                                            VTSApiResponse<responses::AuthenticationToken>,
                                         >(msg_value)
                                         .unwrap();
 
@@ -308,11 +265,11 @@ impl VtsPc {
                                     token = Some(token_data.data.authentication_token);
                                     info!("Recived Token from VtubeStudio");
                                     msg_buffer.pop_front();
-                                    msg_buffer.push_front(VtsPc::auth(&token));
+                                    msg_buffer.push_front(VTubeStudioPlugin::auth(&token));
                                 }
                                 "AuthenticationResponse" => {
                                     let auth_data = serde_json::from_value::<
-                                        VTSApiResponce<responces::AuthenticationResponse>,
+                                        VTSApiResponse<responses::AuthenticationResponse>,
                                     >(msg_value)
                                     .unwrap();
                                     msg_buffer.pop_front();
@@ -321,7 +278,7 @@ impl VtsPc {
                                         let _ = fs::remove_file("token")
                                             .map_err(|e| error!("Unable to delete token: {:?}", e));
                                         info!("Invalid Token, Requesting new...");
-                                        msg_buffer.push_back(VtsPc::auth(&token));
+                                        msg_buffer.push_back(VTubeStudioPlugin::auth(&token));
                                     }
                                 }
                                 "InjectParameterDataResponse" => {
@@ -356,9 +313,72 @@ impl VtsPc {
         }
     }
 
+    fn insert_cyclic_info(context: &mut HashMapContext) {
+        let start = SystemTime::now();
+        let since_the_epoch = start.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let milliseconds: f64 = since_the_epoch.as_millis() as f64 % 1000.0;
+
+        let ping_pong = milliseconds / 1000.0;
+        let wave = if milliseconds < 500.0 {
+            milliseconds / 500.0
+        } else {
+            2.0 - (milliseconds / 500.0)
+        };
+
+        context
+            .set_value("PingPong".into(), ping_pong.into())
+            .unwrap();
+        context.set_value("Wave".into(), wave.into()).unwrap();
+    }
+
+    fn track_cyclic_info_only(precalc_funcs: &Vec<(String, Node)>) -> Option<Message> {
+        let context;
+        {
+            let mut mutex_context = LATEST_CONTEXT.lock().unwrap();
+            if mutex_context.iter_variables().len() == 0 {
+                return None;
+            }
+
+            Self::insert_cyclic_info(&mut mutex_context);
+            mutex_context.set_value("FaceFound".into(), false.into()).unwrap();
+            context = mutex_context.clone();
+        }
+
+        let mut params: Vec<requests::TrackingParam> = Vec::new();
+        for (key, node) in precalc_funcs {
+            params.push(requests::TrackingParam {
+                id: key.as_str(),
+                value: node
+                    .eval_with_context(&context)
+                    .unwrap()
+                    .as_float()
+                    .unwrap()
+                    .clamp(-1000000.0, 1000000.0),
+                weight: Some(1.0),
+            });
+        }
+
+        let params_data = requests::InjectParams {
+            face_found: false,
+            mode: "set",
+            parameter_values: params,
+        };
+        let message_type = "InjectParameterDataRequest";
+        let request = VTSApiRequest {
+            data: Some(params_data),
+            api_name: "VTubeStudioPublicAPI",
+            api_version: Self::VTS_API_VERSION,
+            request_id: Self::REQUEST_ID,
+            message_type,
+        };
+
+        let request_string = serde_json::to_string(&request).unwrap();
+        Some(Message::text(request_string))
+    }
+
     fn tracking_msg(
         precalc_funcs: &Vec<(String, Node)>,
-        receiver: &Receiver<TrackingResponce>,
+        receiver: &Receiver<TrackingResponse>,
     ) -> Option<Message> {
         let mut context = HashMapContext::new();
 
@@ -396,14 +416,19 @@ impl VtsPc {
             .set_value("HeadRotZ".into(), raw_data.rotation.z.into())
             .unwrap();
 
+        context
+            .set_value("FaceFound".into(), raw_data.face_found.into())
+            .unwrap();
+
+        Self::insert_cyclic_info(&mut context);
+
         let mut params: Vec<requests::TrackingParam> = Vec::new();
 
         if raw_data.face_found {
-            for c in precalc_funcs {
+            for (key, node) in precalc_funcs {
                 params.push(requests::TrackingParam {
-                    id: c.0.as_str(),
-                    value: c
-                        .1
+                    id: key.as_str(),
+                    value: node
                         .eval_with_context(&context)
                         .unwrap()
                         .as_float()
@@ -418,24 +443,26 @@ impl VtsPc {
             return None;
         }
 
+        {
+            let mut mutex_context = LATEST_CONTEXT.lock().unwrap();
+            *mutex_context = context;
+        }
+
         let params_data = requests::InjectParams {
             face_found: raw_data.face_found,
             mode: "set",
             parameter_values: params,
         };
-
         let message_type = "InjectParameterDataRequest";
-
         let request = VTSApiRequest {
             data: Some(params_data),
             api_name: "VTubeStudioPublicAPI",
-            api_version: "1.0",
-            request_id: "iiii",
+            api_version: Self::VTS_API_VERSION,
+            request_id: Self::REQUEST_ID,
             message_type,
         };
 
         let request_string = serde_json::to_string(&request).unwrap();
-
         Some(Message::text(request_string))
     }
 
@@ -443,8 +470,8 @@ impl VtsPc {
         let status_req = VTSApiRequest::<i32> {
             data: None,
             api_name: "VTubeStudioPublicAPI",
-            api_version: "1.0",
-            request_id: "iiii",
+            api_version: Self::VTS_API_VERSION,
+            request_id: Self::REQUEST_ID,
             message_type: "APIStateRequest",
         };
 
@@ -458,16 +485,16 @@ impl VtsPc {
             let tk = token.clone().unwrap();
 
             let auth_token = requests::Auth {
-                plugin_name: "RustyBridgeUi",
-                plugin_developer: "ovROG",
+                plugin_name: "SandoitchiBridge",
+                plugin_developer: "An1by",
                 authentication_token: tk.as_str(),
             };
 
             let auth_req = VTSApiRequest {
                 data: Some(auth_token),
                 api_name: "VTubeStudioPublicAPI",
-                api_version: "1.0",
-                request_id: "iiii",
+                api_version: Self::VTS_API_VERSION,
+                request_id: Self::REQUEST_ID,
                 message_type: "AuthenticationRequest",
             };
 
@@ -478,16 +505,16 @@ impl VtsPc {
         }
 
         let auth_data = requests::AuthToken {
-            plugin_name: "RustyBridgeUi",
-            plugin_developer: "ovROG",
+            plugin_name: "SandoitchiBridge",
+            plugin_developer: "An1by",
             plugin_icon: None,
         };
 
         let token_req = VTSApiRequest {
             data: Some(auth_data),
             api_name: "VTubeStudioPublicAPI",
-            api_version: "1.0",
-            request_id: "iiii",
+            api_version: Self::VTS_API_VERSION,
+            request_id: Self::REQUEST_ID,
             message_type: "AuthenticationTokenRequest",
         };
 
@@ -533,11 +560,11 @@ impl VtsPc {
             .into_iter()
             .map(|func| {
                 (func.name.clone(), {
-                    info!("Loading Param: {}", &func.name);
+                    info!("Loading parameter: {}", &func.name);
                     if !def_params.contains(&func.name) {
                         let param_data = requests::ParameterCreation {
                             parameter_name: func.name,
-                            explanation: "Custom rusty-bridge param".to_string(),
+                            explanation: "Custom Sandoitchi Bridge param".to_string(),
                             min: func.min,
                             max: func.max,
                             default_value: func.default_value,
@@ -546,8 +573,8 @@ impl VtsPc {
                         let param_req = VTSApiRequest {
                             data: Some(param_data),
                             api_name: "VTubeStudioPublicAPI",
-                            api_version: "1.0",
-                            request_id: "iiii",
+                            api_version: Self::VTS_API_VERSION,
+                            request_id: Self::REQUEST_ID,
                             message_type: "ParameterCreationRequest",
                         };
 

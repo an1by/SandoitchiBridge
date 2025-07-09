@@ -1,53 +1,76 @@
-# Rusty Bridge
+# Sandoitchi Bridge
 
-Receive tracking data from [VTubeStudio](https://github.com/DenchiSoft/VTubeStudio) on IPhone then modify data according to config and send to [VTubeStudio](https://github.com/DenchiSoft/VTubeStudio) on PC
+Receive tracking data from [tracking apps](#supported-tracking-apps) on iPhone, then modify the data
+according to the configuration and send to [VTubeStudio](https://store.steampowered.com/app/1325860/VTube_Studio/) on PC.
 
-Basically it's alternative to [VBridger](https://store.steampowered.com/app/1898830/VBridger/)
+Basically it's an alternative to [VBridger](https://store.steampowered.com/app/1898830/VBridger/).\
+But **free**, **lightweight** and **open source**.
+
+## Supported tracking apps
+
+- [VTubeStudio](https://apps.apple.com/ru/app/vtube-studio/id1511435444) (`vts` / `vtubestudio`)
+- [iFacialMocap](https://apps.apple.com/ru/app/ifacialmocap/id1489470545) / [iFacialMocapTr](https://apps.apple.com/ru/app/ifacialmocaptr/id1520971310) (`ifm` / `ifacialmocap`)
 
 ## Usage
 
-There 2 ways to use it
-CLI and UI
+There 2 ways to use it: CLI and UI
 
 ### UI
 
-Launch `rusty-bridge-ui.exe`  
-Set path to config file (type it or use button)  
-Type **Local** IPhone Ip  
-Press Connect (Now you can close window)
+1. Launch `sandoitchi_bridge_ui.exe`;
+2. Set path to config file (type it or use button);
+3. Type **Local** phone IP address;
+4. Select your tracking application;
+5. Press `Connect`;
+6. Now you can close the window.
 
 > [!TIP]
-> To close or exit use menu in tray
+> To show or exit program use menu in tray
 
 ### CLI
 
-For CLI use `rusty-bridge.exe` with launch params
+For CLI use `sandoitchi_bridge.exe` with launch params
 
-#### Params:
+#### Arguments
 
-| Command                               | Example              | Description         |
-| ------------------------------------- | -------------------- | ------------------- |
-| `-t <path>`, `--transform-cfg <path>` | `-t test.json`       | Path to config file |
-| `-p <IPv4>`, `--phone-ip <IPv4>`      | `-p "192.168.0.174"` | Local Iphone Ip     |
-| `-h `, `--help`                       | `-h`                 | Show Help           |
-| `-V `, `--version`                    | `-V`                 | Show Version        |
+| Command                                       | Example              | Description                                 |
+| --------------------------------------------- | -------------------- | ------------------------------------------- |
+| `-c <path>`, `--config <path>`                | `-c test.json`       | Path to JSON config                         |
+| `-p <IPv4>`, `--phone-ip <IPv4>`              | `-p "192.168.0.174"` | Phone IP address                            |
+| `-t <type>`, `--tracking-client <type>`       | `-t ifm`             | [Tracking client](#supported-tracking-apps) |
+| `-d <delay>`, `--config-reload-delay <delay>` | `-d 10000`           | Config reload delay                         |
+| `-h `, `--help`                               | `-h`                 | Show Help                                   |
+| `-V `, `--version`                            | `-V`                 | Show Version                                |
 
-## Transform config
+## Transformations configuration
 
-Json file where you define transformations and new Params.
+A JSON file that defines transformations and new parameters.
 
-for math and logic commands you can look [here](https://docs.rs/evalexpr/latest/evalexpr/)
+For math and logic commands, I recommend looking at [that](https://docs.rs/evalexpr/latest/evalexpr/).
 
-There list of params send from IPhone
+There is a list of parameters sent by apps.
 
-#### Cords: - ranged from negative to positive probably won't out of -45...45
+### Cordinates
+
+Each value ranges from negative to positive, probably will not go out of `-45...45` range.
 
 ```
-HeadRotX, HeadRotY, HeadRotZ
-HeadPosX, HeadPosY, HeadPosZ
+HeadRotX
+HeadRotY
+HeadRotZ
+
+HeadPosX
+HeadPosY
+HeadPosZ
 ```
 
-#### BlendShapes: - ranged from 0 to 1
+### BlendShapes
+
+By default, ranged from `0` to `1`.
+
+---
+
+Default keys:
 
 ```
 BrowDownLeft
@@ -110,7 +133,30 @@ NoseSneerRight
 TongueOut
 ```
 
-### Example:
+---
+
+Exclusive for `iFacialMocap`:
+
+```
+Hapihapi
+```
+
+---
+
+Exclusive variables for this bridge:
+
+```python
+# Indicates whether a face was found.
+FaceFound
+# In one second, its value changes linearly from 0 to 1 and back.
+Wave
+# Linearly changes its value from 0 to 1 per second. When it reaches 1, it resets to 0.
+PingPong
+```
+
+Activated when a face is first detected.
+
+### Example
 
 ```json
 [
