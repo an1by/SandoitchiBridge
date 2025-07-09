@@ -29,7 +29,7 @@ There 2 ways to use it: CLI and UI
 
 ### CLI
 
-For CLI use `sandoitchi_bridge.exe` with launch params
+For CLI use `sandoitchi_bridge.exe` with launch arguments.
 
 #### Arguments
 
