@@ -21,8 +21,9 @@ There 2 ways to use it: CLI and UI
 2. Set path to config file (type it or use button);
 3. Type **Local** phone IP address;
 4. Select your tracking application;
-5. Press `Connect`;
-6. Now you can close the window.
+5. Set `face found timeout` near of tracking app (in milliseconds);
+6. Press `Connect`;
+7. Now you can close the window.
 
 > [!TIP]
 > To show or exit program use menu in tray
@@ -33,14 +34,15 @@ For CLI use `sandoitchi_bridge.exe` with launch arguments.
 
 #### Arguments
 
-| Command                                       | Example              | Description                                 |
-| --------------------------------------------- | -------------------- | ------------------------------------------- |
-| `-c <path>`, `--config <path>`                | `-c test.json`       | Path to JSON config                         |
-| `-p <IPv4>`, `--phone-ip <IPv4>`              | `-p "192.168.0.174"` | Phone IP address                            |
-| `-t <type>`, `--tracking-client <type>`       | `-t ifm`             | [Tracking client](#supported-tracking-apps) |
-| `-d <delay>`, `--config-reload-delay <delay>` | `-d 10000`           | Config reload delay                         |
-| `-h `, `--help`                               | `-h`                 | Show Help                                   |
-| `-V `, `--version`                            | `-V`                 | Show Version                                |
+| Command                                           | Example              | Description                                 |
+| ------------------------------------------------- | -------------------- | ------------------------------------------- |
+| `-c <path>`, `--config <path>`                    | `-c test.json`       | Path to JSON config                         |
+| `-p <IPv4>`, `--phone-ip <IPv4>`                  | `-p "192.168.0.174"` | Phone IP address                            |
+| `-t <type>`, `--tracking-client <type>`           | `-t ifm`             | [Tracking client](#supported-tracking-apps) |
+| `-f <timeout>`, `--face_search_timeout <timeout>` | `-f 3000`            | Timout for face searching                   |
+| `-d <delay>`, `--config-reload-delay <delay>`     | `-d 10000`           | Config reload delay                         |
+| `-h `, `--help`                                   | `-h`                 | Show Help                                   |
+| `-V `, `--version`                                | `-V`                 | Show Version                                |
 
 ## Transformations configuration
 
