@@ -21,8 +21,9 @@ There 2 ways to use it: CLI and UI
 2. Set path to config file (type it or use button);
 3. Type **Local** phone IP address;
 4. Select your tracking application;
-5. Press `Connect`;
-6. Now you can close the window.
+5. Set `face found timeout` near of tracking app (in milliseconds);
+6. Press `Connect`;
+7. Now you can close the window.
 
 > [!TIP]
 > To show or exit program use menu in tray
