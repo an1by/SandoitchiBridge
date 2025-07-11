@@ -750,7 +750,7 @@ checksum = "f3cb5ba0dc43242ce17de99c180e96db90b235b8a9fdc9543c96d2209116bd9f"
 
 [[package]]
 name = "sandoitchi_bridge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "evalexpr",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "sandoitchi_bridge_service"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "evalexpr",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "sandoitchi_bridge_ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "embed-resource",

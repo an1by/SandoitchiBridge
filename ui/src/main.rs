@@ -13,7 +13,7 @@ use std::{
 };
 
 use nwd::NwgUi;
-use nwg::NativeUi;
+use nwg::{NativeUi, NumberSelectData};
 use sandoitchi_bridge_service::{
     tracking::{
         client::{TrackingClient, TrackingClientType},
@@ -30,6 +30,7 @@ pub struct UIConfig {
     transform_path: Option<String>,
     ip: Option<String>,
     tracking_client_type: Option<TrackingClientType>,
+    face_search_timeout: Option<i64>,
 }
 
 const TRACKING_CLIENT_TYPES: [TrackingClientType; 2] = [
@@ -39,7 +40,7 @@ const TRACKING_CLIENT_TYPES: [TrackingClientType; 2] = [
 
 #[derive(Default, NwgUi)]
 pub struct App {
-    #[nwg_control(size: (300, 180), position: (300, 300), title: "Sandoitchi Bridge", flags: "WINDOW|VISIBLE")]
+    #[nwg_control(size: (300, 180), position: (300, 300), title: "Sandoitchi Bridge", flags: "WINDOW|VISIBLE", icon: data.embed.icon_str("APP_ICON", None).as_ref())]
     #[nwg_events( OnWindowClose: [App::close], OnInit: [App::init] )]
     window: nwg::Window,
 
@@ -56,8 +57,11 @@ pub struct App {
     #[nwg_control(size: (280, 25), position: (10, 52), placeholder_text: Some("Phone IP (0.0.0.0)"))]
     phone_ip: nwg::TextInput,
 
-    #[nwg_control(selected_index: Some(0), collection: Vec::from(TRACKING_CLIENT_TYPES), size: (280, 25), position: (10, 90))]
+    #[nwg_control(selected_index: Some(0), collection: Vec::from(TRACKING_CLIENT_TYPES), size: (170, 25), position: (10, 90))]
     tracking_client_type: nwg::ComboBox<TrackingClientType>,
+
+    #[nwg_control(min_int: 0, max_int: 60_000, value_int: 3_000, size: (90, 25), position: (190, 90))]
+    face_search_timeout: nwg::NumberSelect,
 
     #[nwg_control(text: "Connect", size: (280, 30), position: (10, 128))]
     #[nwg_events(OnButtonClick: [App::connect, App::save])]
@@ -92,8 +96,6 @@ pub struct App {
 
 impl App {
     fn init(&self) {
-        let em = &self.embed;
-        self.window.set_icon(em.icon_str("APP_ICON", None).as_ref());
         if let Ok(last_config) = fs::read_to_string("ui-cfg.json") {
             let cfg = serde_json::from_str::<UIConfig>(&last_config).unwrap();
 
@@ -116,10 +118,27 @@ impl App {
                     }
                 }
             }
+
+            if cfg.face_search_timeout.is_some() {
+                let timeout = cfg.face_search_timeout.unwrap().abs();
+                let data = NumberSelectData::Int {
+                    value: timeout,
+                    step: 1,
+                    max: 60_000,
+                    min: 0,
+                };
+                self.face_search_timeout.set_data(data);
+            }
         };
     }
 
     fn save(&self) {
+        let data: i64 = self
+            .face_search_timeout
+            .data()
+            .formatted_value()
+            .parse::<i64>()
+            .unwrap();
         let config = UIConfig {
             transform_path: Some(self.transform_file_path.text()),
             ip: Some(self.phone_ip.text()),
@@ -129,6 +148,7 @@ impl App {
                     .unwrap()
                     .clone(),
             ),
+            face_search_timeout: Some(data),
         };
         let config_str = serde_json::to_string(&config).unwrap();
         fs::write("ui-cfg.json", config_str).unwrap();
@@ -139,6 +159,12 @@ impl App {
             self.active.store(true, Ordering::Relaxed);
             let path = self.transform_file_path.text().clone();
             let ip = self.phone_ip.text().clone();
+            let face_search_timeout: i64 = self
+                .face_search_timeout
+                .data()
+                .formatted_value()
+                .parse::<i64>()
+                .unwrap();
 
             let (sender, receiver): (Sender<TrackingResponse>, Receiver<TrackingResponse>) =
                 mpsc::channel();
@@ -147,7 +173,8 @@ impl App {
             let flag_ph = Arc::clone(&self.active);
 
             let _ = thread::spawn(move || {
-                VTubeStudioPlugin::run(receiver, path, 0, flag_pc);
+                VTubeStudioPlugin::new(receiver, path, 0, face_search_timeout.unsigned_abs())
+                    .run(flag_pc);
             });
 
             let function: fn(

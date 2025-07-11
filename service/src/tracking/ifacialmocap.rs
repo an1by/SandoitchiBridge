@@ -1,13 +1,12 @@
-use crate::tracking::{
-    client::TrackingClient,
-    response::{Cords, Shape, TrackingResponse},
+use crate::{
+    tracking::{
+        client::TrackingClient,
+        response::{Cords, Shape, TrackingResponse},
+    },
+    utils::get_current_timestamp,
 };
 use regex::Regex;
-use std::{
-    collections::HashMap,
-    sync::atomic::Ordering,
-    time::SystemTime,
-};
+use std::{collections::HashMap, sync::atomic::Ordering};
 
 use std::{
     io::Read,
@@ -222,10 +221,7 @@ fn parse_tracking_string(string: &str) -> Result<TrackingResponse, Box<dyn std::
         v: left_eye_values[0],
     });
 
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = get_current_timestamp();
 
     Ok(TrackingResponse {
         timestamp,

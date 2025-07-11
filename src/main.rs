@@ -41,11 +41,19 @@ struct Args {
     )]
     tracking_client: TrackingClientType,
     #[arg(
+        short,
+        long,
+        default_value_t = 3000,
+        hide_default_value = true,
+        help = "The time in milliseconds to wait before changing FaceFound to 0. Default: 3000"
+    )]
+    face_search_timeout: u64,
+    #[arg(
         short = 'd',
         long,
         default_value_t = 0,
         hide_default_value = true,
-        help = "Optional delay for config reloading in milliseconds. Zero or lower - disabled"
+        help = "Optional delay for config reloading in milliseconds. Default: 0 (disabled)"
     )]
     config_reload_delay: u64,
 }
@@ -66,7 +74,12 @@ fn main() {
         mpsc::channel();
 
     let pctr_handler = thread::spawn(move || {
-        VTubeStudioPlugin::run(receiver, args.config, args.config_reload_delay, active_flag);
+        VTubeStudioPlugin::new(
+            receiver,
+            args.config,
+            args.config_reload_delay,
+            args.face_search_timeout,
+        ).run(active_flag);
     });
 
     let function: fn(ip: String, sender: Sender<TrackingResponse>, active: Arc<AtomicBool>);

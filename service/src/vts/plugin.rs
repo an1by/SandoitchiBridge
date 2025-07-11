@@ -1,5 +1,4 @@
 use std::{
-    cmp::max,
     collections::VecDeque,
     fs,
     net::{TcpStream, UdpSocket},
@@ -11,13 +10,16 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use evalexpr::{ContextWithMutableVariables, HashMapContext, IterateVariablesContext, Node};
+use evalexpr::{
+    Context, ContextWithMutableVariables, HashMapContext, IterateVariablesContext, Node,
+};
 use log::{error, info, warn};
 use serde_json::Value;
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
 use crate::{
     tracking::response::TrackingResponse,
+    utils::get_current_timestamp,
     vts::{requests, responses},
 };
 
@@ -54,32 +56,44 @@ struct CalcFn {
     default_value: f64,
 }
 
-static LATEST_CONTEXT: LazyLock<Mutex<HashMapContext>> =
-    LazyLock::new(|| Mutex::new(HashMapContext::new()));
+pub struct VTubeStudioPlugin {
+    receiver: Receiver<TrackingResponse>,
+    transformation_cfg_path: String,
+    config_reload_interval: Duration,
+    face_search_timeout: u64,
 
-pub struct VTubeStudioPlugin;
+    last_context: LazyLock<Mutex<HashMapContext>>,
+    last_context_timestamp: LazyLock<Mutex<u64>>,
+}
 
 impl VTubeStudioPlugin {
     const REQUEST_ID: &str = "SandoitchiBridge";
     const VTS_API_VERSION: &str = "1.0";
+    const AFK_PARAMETERS: [&str; 3] = ["FaceFound", "Wave", "PingPong"];
 
-    pub fn run(
+    pub fn new(
         receiver: Receiver<TrackingResponse>,
         transformation_cfg_path: String,
         config_reload_delay: u64,
-        active: Arc<AtomicBool>,
-    ) {
+        face_search_timeout: u64,
+    ) -> Self {
+        let this = Self {
+            receiver,
+            transformation_cfg_path,
+            config_reload_interval: Duration::from_millis(config_reload_delay),
+            face_search_timeout,
+            last_context: LazyLock::new(|| Mutex::new(HashMapContext::new())),
+            last_context_timestamp: LazyLock::new(|| Mutex::new(0)),
+        };
+        return this;
+    }
+
+    pub fn run(&self, active: Arc<AtomicBool>) {
         while active.load(Ordering::Relaxed) {
             let flag = Arc::clone(&active);
 
             let websocket = VTubeStudioPlugin::connect();
-            VTubeStudioPlugin::msg_loop(
-                websocket,
-                &receiver,
-                &transformation_cfg_path,
-                &config_reload_delay,
-                flag,
-            );
+            self.msg_loop(websocket, flag);
         }
     }
 
@@ -134,36 +148,30 @@ impl VTubeStudioPlugin {
     }
 
     fn msg_loop(
+        &self,
         mut websocket: WebSocket<MaybeTlsStream<TcpStream>>,
-        receiver: &Receiver<TrackingResponse>,
-        transformation_cfg_path: &String,
-        config_reload_delay: &u64,
         active: Arc<AtomicBool>,
     ) {
         let mut msg_buffer: VecDeque<Message> = VecDeque::new();
         let mut token: Option<String> = fs::read_to_string("token").ok();
 
         let vts_status = VTubeStudioPlugin::req_status_msg();
-        let (mut precalc_funcs, mut new_params) =
-            VTubeStudioPlugin::precalc_cfg(transformation_cfg_path);
+        let (mut precalc_funcs, mut new_params) = self.precalc_cfg();
 
         msg_buffer.push_back(vts_status.clone());
         msg_buffer.append(&mut new_params);
 
-        let config_reload_interval_delay = max(*config_reload_delay, 0);
-        let config_reload_interval = Duration::from_millis(config_reload_interval_delay);
         let mut last_time_config_reloaded = Instant::now();
 
         let mut dont_send = false;
 
         while active.load(Ordering::Relaxed) {
-            if config_reload_interval_delay > 0
-                && last_time_config_reloaded.elapsed() > config_reload_interval
+            if !self.config_reload_interval.is_zero()
+                && last_time_config_reloaded.elapsed() > self.config_reload_interval
             {
                 last_time_config_reloaded = Instant::now();
 
-                (precalc_funcs, new_params) =
-                    VTubeStudioPlugin::precalc_cfg(transformation_cfg_path);
+                (precalc_funcs, new_params) = self.precalc_cfg();
 
                 msg_buffer.clear();
                 msg_buffer.push_back(vts_status.clone());
@@ -182,11 +190,7 @@ impl VTubeStudioPlugin {
                         }
                     }
                 } else {
-                    let mut tracking_data =
-                        VTubeStudioPlugin::tracking_msg(&precalc_funcs, receiver);
-                    if tracking_data.is_none() {
-                        tracking_data = VTubeStudioPlugin::track_cyclic_info_only(&precalc_funcs);
-                    }
+                    let tracking_data = self.tracking_msg(&precalc_funcs);
 
                     if tracking_data.is_some() {
                         match websocket.send(tracking_data.unwrap()) {
@@ -198,7 +202,7 @@ impl VTubeStudioPlugin {
                         }
                     } else {
                         continue;
-                    };
+                    }
                 }
             }
 
@@ -281,11 +285,8 @@ impl VTubeStudioPlugin {
                                         msg_buffer.push_back(VTubeStudioPlugin::auth(&token));
                                     }
                                 }
-                                "InjectParameterDataResponse" => {
-                                    // println!("{:?}", msg);
-                                }
+                                "InjectParameterDataResponse" => {}
                                 "ParameterCreationResponse" => {
-                                    // println!("{:?}", msg);
                                     msg_buffer.pop_front();
                                 }
                                 _ => warn!("Unknown message: {}", msg_value["messageType"]),
@@ -306,14 +307,10 @@ impl VTubeStudioPlugin {
                     break; // Reconnect
                 }
             }
-
-            //rate limit
-            // thread::sleep(next_time - std::time::Instant::now());
-            // next_time += interval;
         }
     }
 
-    fn insert_cyclic_info(context: &mut HashMapContext) {
+    fn insert_cyclic_info(&self, context: &mut HashMapContext) {
         let start = SystemTime::now();
         let since_the_epoch = start.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let milliseconds: f64 = since_the_epoch.as_millis() as f64 % 1000.0;
@@ -331,31 +328,52 @@ impl VTubeStudioPlugin {
         context.set_value("Wave".into(), wave.into()).unwrap();
     }
 
-    fn track_cyclic_info_only(precalc_funcs: &Vec<(String, Node)>) -> Option<Message> {
-        let context;
+    fn track_cyclic_info_only(
+        &self,
+        precalc_funcs: &Vec<(String, String, Node)>,
+        face_search_timeout: &u64,
+    ) -> Option<Message> {
+        let mut params: Vec<requests::TrackingParam> = Vec::new();
         {
-            let mut mutex_context = LATEST_CONTEXT.lock().unwrap();
+            let mut mutex_context = self.last_context.lock().unwrap();
             if mutex_context.iter_variables().len() == 0 {
                 return None;
             }
 
-            Self::insert_cyclic_info(&mut mutex_context);
-            mutex_context.set_value("FaceFound".into(), false.into()).unwrap();
-            context = mutex_context.clone();
-        }
+            let mut face_found = mutex_context
+                .get_value("FaceFound")
+                .unwrap()
+                .as_float()
+                .unwrap();
+            if face_found == 1.0 {
+                let timestamp = self.last_context_timestamp.lock().unwrap();
+                if *timestamp - get_current_timestamp() > *face_search_timeout {
+                    face_found = 0.0;
+                    mutex_context
+                        .set_value("FaceFound".into(), face_found.into())
+                        .unwrap();
+                }
+            }
+            self.insert_cyclic_info(&mut mutex_context);
 
-        let mut params: Vec<requests::TrackingParam> = Vec::new();
-        for (key, node) in precalc_funcs {
-            params.push(requests::TrackingParam {
-                id: key.as_str(),
-                value: node
-                    .eval_with_context(&context)
-                    .unwrap()
-                    .as_float()
-                    .unwrap()
-                    .clamp(-1000000.0, 1000000.0),
-                weight: Some(1.0),
-            });
+            let cloned_context = mutex_context.clone();
+            for (key, func, node) in precalc_funcs {
+                for parameter in Self::AFK_PARAMETERS {
+                    if func.contains(parameter) {
+                        params.push(requests::TrackingParam {
+                            id: key.as_str(),
+                            value: node
+                                .eval_with_context(&cloned_context)
+                                .unwrap()
+                                .as_float()
+                                .unwrap()
+                                .clamp(-1_000_000.0, 1_000_000.0),
+                            weight: Some(1.0),
+                        });
+                        break;
+                    }
+                }
+            }
         }
 
         let params_data = requests::InjectParams {
@@ -376,19 +394,16 @@ impl VTubeStudioPlugin {
         Some(Message::text(request_string))
     }
 
-    fn tracking_msg(
-        precalc_funcs: &Vec<(String, Node)>,
-        receiver: &Receiver<TrackingResponse>,
-    ) -> Option<Message> {
+    fn tracking_msg(&self, precalc_funcs: &Vec<(String, String, Node)>) -> Option<Message> {
         let mut context = HashMapContext::new();
 
-        let mut binding = receiver.try_iter();
+        let mut binding = self.receiver.try_iter();
         let it = binding.by_ref();
 
         let raw_data = match it.last() {
             Some(data) => data,
             None => {
-                return None;
+                return self.track_cyclic_info_only(precalc_funcs, &self.face_search_timeout);
             }
         };
 
@@ -417,15 +432,18 @@ impl VTubeStudioPlugin {
             .unwrap();
 
         context
-            .set_value("FaceFound".into(), raw_data.face_found.into())
+            .set_value(
+                "FaceFound".into(),
+                (if raw_data.face_found { 1.0 } else { 0.0 }).into(),
+            )
             .unwrap();
 
-        Self::insert_cyclic_info(&mut context);
+        self.insert_cyclic_info(&mut context);
 
         let mut params: Vec<requests::TrackingParam> = Vec::new();
 
         if raw_data.face_found {
-            for (key, node) in precalc_funcs {
+            for (key, _, node) in precalc_funcs {
                 params.push(requests::TrackingParam {
                     id: key.as_str(),
                     value: node
@@ -444,8 +462,11 @@ impl VTubeStudioPlugin {
         }
 
         {
-            let mut mutex_context = LATEST_CONTEXT.lock().unwrap();
+            let mut mutex_context = self.last_context.lock().unwrap();
             *mutex_context = context;
+
+            let mut timestamp = self.last_context_timestamp.lock().unwrap();
+            *timestamp = get_current_timestamp();
         }
 
         let params_data = requests::InjectParams {
@@ -524,8 +545,11 @@ impl VTubeStudioPlugin {
         Message::text(token_req_msg)
     }
 
-    fn precalc_cfg(file_path: &String) -> (Vec<(String, evalexpr::Node)>, VecDeque<Message>) {
-        info!("Loadling tranformation config: {}", file_path);
+    fn precalc_cfg(&self) -> (Vec<(String, String, evalexpr::Node)>, VecDeque<Message>) {
+        info!(
+            "Loadling tranformation config: {}",
+            &self.transformation_cfg_path
+        );
 
         let def_params = [
             String::from("FacePositionX"),
@@ -553,13 +577,13 @@ impl VTubeStudioPlugin {
         ];
 
         let mut new_params: VecDeque<Message> = VecDeque::new();
-        let config = fs::read_to_string(file_path).unwrap();
+        let config = fs::read_to_string(&self.transformation_cfg_path).unwrap();
         let calc_fns: Vec<CalcFn> = serde_json::from_str(&config[..]).unwrap();
 
         let precalc_fns: Vec<_> = calc_fns
             .into_iter()
             .map(|func| {
-                (func.name.clone(), {
+                (func.name.clone(), func.func.clone(), {
                     info!("Loading parameter: {}", &func.name);
                     if !def_params.contains(&func.name) {
                         let param_data = requests::ParameterCreation {
