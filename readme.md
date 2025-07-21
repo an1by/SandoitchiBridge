@@ -150,10 +150,10 @@ Exclusive variables for this bridge:
 ```python
 # Indicates whether a face was found.
 FaceFound
-# In one second, its value changes linearly from 0 to 1 and back.
-Wave
-# Linearly changes its value from 0 to 1 per second. When it reaches 1, it resets to 0.
-PingPong
+# In one second (1000ms), its value changes linearly from 0 to 1 and back.
+Wave1000
+# Linearly changes its value from 0 to 1 per 5 seconds (5000ms). When it reaches 1, it resets to 0.
+PingPong5000
 ```
 
 Activated when a face is first detected.
@@ -391,6 +391,20 @@ Activated when a face is first detected.
     "func": "HeadPosZ * - .5",
     "min": -15.0,
     "max": 15.0,
+    "defaultValue": 0
+  },
+    {
+    "name": "Wave",
+    "func": "Wave10000 * FaceFound",
+    "min": 0.0,
+    "max": 1.0,
+    "defaultValue": 1
+  },
+  {
+    "name": "PingPong",
+    "func": "PingPong5000",
+    "min": 0.0,
+    "max": 1.0,
     "defaultValue": 0
   }
 ]
