@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fs,
     net::{TcpStream, UdpSocket},
     sync::{
@@ -7,19 +7,20 @@ use std::{
         mpsc::Receiver,
         Arc, LazyLock, Mutex,
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use evalexpr::{
     Context, ContextWithMutableVariables, HashMapContext, IterateVariablesContext, Node,
 };
 use log::{error, info, warn};
+use regex::Regex;
 use serde_json::Value;
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
 use crate::{
     tracking::response::TrackingResponse,
-    utils::get_current_timestamp,
+    utils::{get_current_timestamp, get_current_timestamp_ms},
     vts::{requests, responses},
 };
 
@@ -156,7 +157,7 @@ impl VTubeStudioPlugin {
         let mut token: Option<String> = fs::read_to_string("token").ok();
 
         let vts_status = VTubeStudioPlugin::req_status_msg();
-        let (mut precalc_funcs, mut new_params) = self.precalc_cfg();
+        let (mut precalc_funcs, mut used_timestamps, mut new_params) = self.precalc_cfg();
 
         msg_buffer.push_back(vts_status.clone());
         msg_buffer.append(&mut new_params);
@@ -171,7 +172,7 @@ impl VTubeStudioPlugin {
             {
                 last_time_config_reloaded = Instant::now();
 
-                (precalc_funcs, new_params) = self.precalc_cfg();
+                (precalc_funcs, used_timestamps, new_params) = self.precalc_cfg();
 
                 msg_buffer.clear();
                 msg_buffer.push_back(vts_status.clone());
@@ -190,7 +191,7 @@ impl VTubeStudioPlugin {
                         }
                     }
                 } else {
-                    let tracking_data = self.tracking_msg(&precalc_funcs);
+                    let tracking_data = self.tracking_msg(&precalc_funcs, &used_timestamps);
 
                     if tracking_data.is_some() {
                         match websocket.send(tracking_data.unwrap()) {
@@ -310,27 +311,38 @@ impl VTubeStudioPlugin {
         }
     }
 
-    fn insert_cyclic_info(&self, context: &mut HashMapContext) {
-        let start = SystemTime::now();
-        let since_the_epoch = start.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        let milliseconds: f64 = since_the_epoch.as_millis() as f64 % 1000.0;
+    fn calculate_ppw(&self, total_milliseconds: u128, cycle_duration_ms: u64) -> (f64, f64) {
+        let milliseconds_in_cycle = total_milliseconds as u64 % cycle_duration_ms;
 
-        let ping_pong = milliseconds / 1000.0;
-        let wave = if milliseconds < 500.0 {
-            milliseconds / 500.0
+        let milliseconds = milliseconds_in_cycle as f64;
+
+        let ping_pong = milliseconds / cycle_duration_ms as f64;
+
+        let half_cycle = (cycle_duration_ms as f64) / 2.0;
+        let wave = if milliseconds < half_cycle {
+            milliseconds / half_cycle
         } else {
-            2.0 - (milliseconds / 500.0)
+            2.0 - (milliseconds / half_cycle)
         };
 
-        context
-            .set_value("PingPong".into(), ping_pong.into())
-            .unwrap();
-        context.set_value("Wave".into(), wave.into()).unwrap();
+        return (ping_pong, wave);
+    }
+
+    fn insert_cyclic_info(&self, context: &mut HashMapContext, used_timestamps: &HashSet<u64>) {
+        let total_milliseconds = get_current_timestamp_ms();
+        for v in used_timestamps {
+            let (ping_pong, wave) = self.calculate_ppw(total_milliseconds, *v);
+            context
+                .set_value(format!("PingPong{v}"), ping_pong.into())
+                .unwrap();
+            context.set_value(format!("Wave{v}"), wave.into()).unwrap();
+        }
     }
 
     fn track_cyclic_info_only(
         &self,
         precalc_funcs: &Vec<(String, String, Node)>,
+        used_timestamps: &HashSet<u64>,
         face_search_timeout: &u64,
     ) -> Option<Message> {
         let mut params: Vec<requests::TrackingParam> = Vec::new();
@@ -347,14 +359,16 @@ impl VTubeStudioPlugin {
                 .unwrap();
             if face_found == 1.0 {
                 let timestamp = self.last_context_timestamp.lock().unwrap();
-                if *timestamp - get_current_timestamp() > *face_search_timeout {
+                let difference = *timestamp as f64 - get_current_timestamp() as f64;
+                let timeout = *face_search_timeout as f64;
+                if difference > timeout {
                     face_found = 0.0;
                     mutex_context
                         .set_value("FaceFound".into(), face_found.into())
                         .unwrap();
                 }
             }
-            self.insert_cyclic_info(&mut mutex_context);
+            self.insert_cyclic_info(&mut mutex_context, used_timestamps);
 
             let cloned_context = mutex_context.clone();
             for (key, func, node) in precalc_funcs {
@@ -394,7 +408,11 @@ impl VTubeStudioPlugin {
         Some(Message::text(request_string))
     }
 
-    fn tracking_msg(&self, precalc_funcs: &Vec<(String, String, Node)>) -> Option<Message> {
+    fn tracking_msg(
+        &self,
+        precalc_funcs: &Vec<(String, String, Node)>,
+        used_timestamps: &HashSet<u64>,
+    ) -> Option<Message> {
         let mut context = HashMapContext::new();
 
         let mut binding = self.receiver.try_iter();
@@ -403,9 +421,15 @@ impl VTubeStudioPlugin {
         let raw_data = match it.last() {
             Some(data) => data,
             None => {
-                return self.track_cyclic_info_only(precalc_funcs, &self.face_search_timeout);
+                return self.track_cyclic_info_only(
+                    precalc_funcs,
+                    used_timestamps,
+                    &self.face_search_timeout,
+                );
             }
         };
+
+        self.insert_cyclic_info(&mut context, used_timestamps);
 
         for v in &raw_data.blend_shapes {
             context.set_value(v.k.clone(), v.v.into()).unwrap();
@@ -437,8 +461,6 @@ impl VTubeStudioPlugin {
                 (if raw_data.face_found { 1.0 } else { 0.0 }).into(),
             )
             .unwrap();
-
-        self.insert_cyclic_info(&mut context);
 
         let mut params: Vec<requests::TrackingParam> = Vec::new();
 
@@ -545,7 +567,21 @@ impl VTubeStudioPlugin {
         Message::text(token_req_msg)
     }
 
-    fn precalc_cfg(&self) -> (Vec<(String, String, evalexpr::Node)>, VecDeque<Message>) {
+    fn extract_wave_pingpong_numbers(&self, input: &str) -> HashSet<u64> {
+        let re = Regex::new(r"(Wave|PingPong)(\d+)").unwrap();
+
+        re.captures_iter(input)
+            .filter_map(|caps| caps.get(2)?.as_str().parse::<u64>().ok())
+            .collect()
+    }
+
+    fn precalc_cfg(
+        &self,
+    ) -> (
+        Vec<(String, String, evalexpr::Node)>,
+        HashSet<u64>,
+        VecDeque<Message>,
+    ) {
         info!(
             "Loadling tranformation config: {}",
             &self.transformation_cfg_path
@@ -580,47 +616,52 @@ impl VTubeStudioPlugin {
         let config = fs::read_to_string(&self.transformation_cfg_path).unwrap();
         let calc_fns: Vec<CalcFn> = serde_json::from_str(&config[..]).unwrap();
 
-        let precalc_fns: Vec<_> = calc_fns
-            .into_iter()
-            .map(|func| {
-                (func.name.clone(), func.func.clone(), {
-                    info!("Loading parameter: {}", &func.name);
-                    if !def_params.contains(&func.name) {
-                        let param_data = requests::ParameterCreation {
-                            parameter_name: func.name,
-                            explanation: "Custom Sandoitchi Bridge param".to_string(),
-                            min: func.min,
-                            max: func.max,
-                            default_value: func.default_value,
-                        };
+        let mut timestamps = HashSet::new();
+        let mut precalc_fns: Vec<_> = Vec::new();
+        for func in calc_fns.into_iter() {
+            let name: String = func.name;
 
-                        let param_req = VTSApiRequest {
-                            data: Some(param_data),
-                            api_name: "VTubeStudioPublicAPI",
-                            api_version: Self::VTS_API_VERSION,
-                            request_id: Self::REQUEST_ID,
-                            message_type: "ParameterCreationRequest",
-                        };
+            info!("Loading parameter: {}", &name);
+            if !def_params.contains(&name) {
+                let param_data = requests::ParameterCreation {
+                    parameter_name: name.clone(),
+                    explanation: "Custom Sandoitchi Bridge param".to_string(),
+                    min: func.min,
+                    max: func.max,
+                    default_value: func.default_value,
+                };
 
-                        let param_req_msg = serde_json::to_string(&param_req).unwrap();
+                let param_req = VTSApiRequest {
+                    data: Some(param_data),
+                    api_name: "VTubeStudioPublicAPI",
+                    api_version: Self::VTS_API_VERSION,
+                    request_id: Self::REQUEST_ID,
+                    message_type: "ParameterCreationRequest",
+                };
 
-                        new_params.push_back(Message::text(param_req_msg));
-                    }
-                    match evalexpr::build_operator_tree(&func.func[..]) {
-                        Ok(calc) => calc,
-                        Err(error) => {
-                            error!(
-                                "Unable to read cfg (probably error or typo in function): {}",
-                                error
-                            );
-                            panic!()
-                        }
-                    }
-                })
-            })
-            .collect();
+                let param_req_msg = serde_json::to_string(&param_req).unwrap();
+
+                new_params.push_back(Message::text(param_req_msg));
+            }
+
+            let local_timestamps = self.extract_wave_pingpong_numbers(&func.func);
+            timestamps = timestamps.union(&local_timestamps).cloned().collect();
+
+            let node = match evalexpr::build_operator_tree(&func.func[..]) {
+                Ok(calc) => calc,
+                Err(error) => {
+                    error!(
+                        "Unable to read cfg (probably error or typo in function): {}",
+                        error
+                    );
+                    panic!()
+                }
+            };
+
+            precalc_fns.push((name, func.func.clone(), node));
+        }
 
         info!("Tranformation config loaded");
-        (precalc_fns, new_params)
+        (precalc_fns, timestamps, new_params)
     }
 }
